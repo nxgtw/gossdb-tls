@@ -83,7 +83,9 @@ func connect(ip string, port int, auth string) (*Client, error) {
 
 func (c *Client) Debug(flag bool) bool {
 	debug = flag
-	log.Println("SSDB Client Debug Mode:", debug)
+	if debug {
+		log.Println("SSDB Client Debug Mode:", debug)
+	}
 	return debug
 }
 
@@ -116,7 +118,9 @@ func (c *Client) Connect() error {
 	if c.Retry {
 		log.Printf("Client[%s] retry connect to %s:%d success.", c.Id, c.Ip, c.Port)
 	} else {
-		log.Printf("Client[%s] connect to %s:%d success. Info:%v\n", c.Id, c.Ip, c.Port, c.sock.LocalAddr())
+		if debug {
+			log.Printf("Client[%s] connect to %s:%d success. Info:%v\n", c.Id, c.Ip, c.Port, c.sock.LocalAddr())
+		}
 	}
 	c.Retry = false
 	if !c.init {
@@ -1044,7 +1048,6 @@ func (c *Client) Close() error {
 			close(c.process)
 		}
 		c.sock.Close()
-		log.Printf("Connection close:%v Addr:%v\n", c.Id, c.sock.LocalAddr())
 		c = nil
 	}
 

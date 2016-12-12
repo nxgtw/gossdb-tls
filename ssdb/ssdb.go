@@ -166,10 +166,10 @@ func (c *Client) RetryConnect() {
 		c.Retry = true
 		c.Connected = false
 		c.mu.Unlock()
-		log.Printf("Client[%s] retry connect to %s:%d Connected:%v Closed:%v\n", c.Id, c.Ip, c.Port, c.Connected, c.Closed)
+		//log.Printf("Client[%s] retry connect to %s:%d Connected:%v Closed:%v\n", c.Id, c.Ip, c.Port, c.Connected, c.Closed)
 		for {
 			if !c.Connected && !c.Closed {
-				log.Printf("Client[%s] retry connect to %s:%d\n", c.Id, c.Ip, c.Port)
+				//log.Printf("Client[%s] retry connect to %s:%d\n", c.Id, c.Ip, c.Port)
 				err := c.Connect()
 				if err != nil {
 					log.Printf("Client[%s] Retry connect to %s:%d Failed. Error:%v\n", c.Id, c.Ip, c.Port, err)
@@ -787,7 +787,7 @@ func (c *Client) Send(args []interface{}) error {
 			case nil:
 				s = ""
 			default:
-				return fmt.Errorf("bad arguments")
+				return fmt.Errorf("[%s]zip send bad arguments:%v", c.Id, args)
 			}
 			w.Write([]byte(fmt.Sprintf("%d", len(s))))
 			w.Write([]byte("\n"))
@@ -835,7 +835,7 @@ func (c *Client) Send(args []interface{}) error {
 			case nil:
 				s = ""
 			default:
-				return fmt.Errorf("bad arguments")
+				return fmt.Errorf("[%s]public send bad arguments:%v type:%v", c.Id, args, arg)
 			}
 			buf.WriteString(fmt.Sprintf("%d", len(s)))
 			buf.WriteByte('\n')
@@ -881,7 +881,7 @@ func (c *Client) send(args []interface{}) error {
 		case nil:
 			s = ""
 		default:
-			return fmt.Errorf("bad arguments")
+			return fmt.Errorf("private send bad arguments:%v", args)
 		}
 		buf.WriteString(fmt.Sprintf("%d", len(s)))
 		buf.WriteByte('\n')
@@ -891,6 +891,179 @@ func (c *Client) send(args []interface{}) error {
 	buf.WriteByte('\n')
 	_, err := c.sock.Write(buf.Bytes())
 	return err
+}
+
+func (c *Client) BatchBufSend(batchArgs [][]interface{}) error {
+	var privatePool []*Client
+	log.Println("BatchSend Total:", len(batchArgs))
+	wg := &sync.WaitGroup{}
+	splitSize := 500
+	connNum := len(batchArgs) / splitSize
+	if connNum < 1 {
+		connNum = 1
+	}
+
+	var splitArgs [][][]interface{}
+
+	if len(batchArgs) >= splitSize {
+		pics := int(len(batchArgs) / splitSize)
+		currentSize := len(batchArgs)
+		for i := 0; i <= pics; i++ {
+			start := i * splitSize
+			if start >= currentSize {
+				start = currentSize
+			}
+			end := (i + 1) * splitSize
+			if end >= currentSize {
+				end = currentSize
+			}
+			if start != end {
+				splitArgs = append(splitArgs, batchArgs[start:end])
+			}
+		}
+	} else {
+		splitArgs = append(splitArgs, batchArgs)
+	}
+	connNum = len(splitArgs)
+	log.Println("BatchSend Total Connection:", connNum)
+	for i := 0; i < connNum; i++ {
+		innerClient, _ := Connect(c.Ip, c.Port, c.Password)
+		privatePool = append(privatePool, innerClient)
+	}
+	wg.Add(connNum)
+	for idx, args := range splitArgs {
+
+		privatePool[idx].batchSend(wg, args)
+	}
+	wg.Wait()
+	for _, conn := range privatePool {
+		conn.Close()
+	}
+	return nil
+}
+
+func (c *Client) batchSend(wg *sync.WaitGroup, batchArgs [][]interface{}) error {
+	var buf bytes.Buffer
+	//log.Println("batch sub send:", len(batchArgs))
+	defer wg.Done()
+	for _, args := range batchArgs {
+		for _, arg := range args {
+			var s string
+			switch arg := arg.(type) {
+			case string:
+				s = arg
+			case []byte:
+				s = string(arg)
+			case []string:
+				for _, s := range arg {
+					buf.WriteString(fmt.Sprintf("%d", len(s)))
+					buf.WriteByte('\n')
+					buf.WriteString(s)
+					buf.WriteByte('\n')
+				}
+				continue
+			case int:
+				s = fmt.Sprintf("%d", arg)
+			case int64:
+				s = fmt.Sprintf("%d", arg)
+			case float64:
+				s = fmt.Sprintf("%f", arg)
+			case bool:
+				if arg {
+					s = "1"
+				} else {
+					s = "0"
+				}
+			case nil:
+				s = ""
+			default:
+			}
+			buf.WriteString(fmt.Sprintf("%d", len(s)))
+			buf.WriteByte('\n')
+			buf.WriteString(s)
+			buf.WriteByte('\n')
+		}
+		buf.WriteByte('\n')
+	}
+	_, err := c.sock.Write(buf.Bytes())
+	return err
+}
+
+func (c *Client) batchSubSend(wg *sync.WaitGroup, batchArgs [][]string) error {
+	//log.Println("batch sub send:", len(batchArgs))
+	defer wg.Done()
+	for _, args := range batchArgs {
+		/*err := c.send([]interface{}{args})
+		if err != nil {
+			log.Println("batchSubSend:", args, err)
+		}
+		//time.Sleep(1 * time.Millisecond)
+		time.Sleep(1500 * time.Microsecond)*/
+		_, err := c.Do(args)
+		if err != nil {
+			log.Printf("batchSubSend Error[%v]:%v len:%d\n", args, err, len(args))
+			/*time.Sleep(500 * time.Millisecond)
+			//retry again
+			_, err = c.Do(args)
+			if err != nil {
+				log.Printf("batchSubSend Retry Error[%v]:%v len:%d\n", args, err, len(args))
+			}*/
+		}
+		//time.Sleep(1 * time.Millisecond)
+	}
+	return nil
+}
+
+func (c *Client) BatchSend(batchArgs [][]string) error {
+	var privatePool []*Client
+	log.Println("BatchSend Total:", len(batchArgs))
+	wg := &sync.WaitGroup{}
+	splitSize := 1000
+	connNum := len(batchArgs) / splitSize
+	if connNum < 1 {
+		connNum = 1
+	}
+
+	var splitArgs [][][]string
+
+	if len(batchArgs) >= splitSize {
+		pics := int(len(batchArgs) / splitSize)
+		currentSize := len(batchArgs)
+		for i := 0; i <= pics; i++ {
+			start := i * splitSize
+			if start >= currentSize {
+				start = currentSize
+			}
+			end := (i + 1) * splitSize
+			if end >= currentSize {
+				end = currentSize
+			}
+			if start != end {
+				splitArgs = append(splitArgs, batchArgs[start:end])
+			}
+		}
+	} else {
+		splitArgs = append(splitArgs, batchArgs)
+	}
+	connNum = len(splitArgs)
+	log.Println("BatchSend Total Connection:", connNum, c.Ip, c.Port, c.Password)
+	for i := 0; i < connNum; i++ {
+		innerClient, err := Connect(c.Ip, c.Port, c.Password)
+		if err != nil {
+			log.Printf("BatchSend[%v]:%v\n", i, err)
+		}
+		privatePool = append(privatePool, innerClient)
+		//result,err := innerClient.Do("ping")
+	}
+	wg.Add(connNum)
+	for idx, args := range splitArgs {
+		privatePool[idx].batchSubSend(wg, args)
+	}
+	wg.Wait()
+	for _, conn := range privatePool {
+		conn.Close()
+	}
+	return nil
 }
 
 func (c *Client) Recv() ([]string, error) {

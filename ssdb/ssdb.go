@@ -786,6 +786,14 @@ func (c *Client) Send(args []interface{}) error {
 				}
 			case nil:
 				s = ""
+			case []interface{}:
+				for _, s := range arg {
+					buf.WriteString(fmt.Sprintf("%d", len(s.(string))))
+					buf.WriteByte('\n')
+					buf.WriteString(s.(string))
+					buf.WriteByte('\n')
+				}
+				continue
 			default:
 				return fmt.Errorf("[%s]zip send bad arguments:%v", c.Id, args)
 			}
@@ -834,6 +842,14 @@ func (c *Client) Send(args []interface{}) error {
 				}
 			case nil:
 				s = ""
+			case []interface{}:
+				for _, s := range arg {
+					buf.WriteString(fmt.Sprintf("%d", len(s.(string))))
+					buf.WriteByte('\n')
+					buf.WriteString(s.(string))
+					buf.WriteByte('\n')
+				}
+				continue
 			default:
 				return fmt.Errorf("[%s]public send bad arguments:%v type:%v", c.Id, args, arg)
 			}
@@ -878,6 +894,14 @@ func (c *Client) send(args []interface{}) error {
 			} else {
 				s = "0"
 			}
+		case []interface{}:
+			for _, s := range arg {
+				buf.WriteString(fmt.Sprintf("%d", len(s.(string))))
+				buf.WriteByte('\n')
+				buf.WriteString(s.(string))
+				buf.WriteByte('\n')
+			}
+			continue
 		case nil:
 			s = ""
 		default:
@@ -989,42 +1013,32 @@ func (c *Client) batchSend(wg *sync.WaitGroup, batchArgs [][]interface{}) error 
 	return err
 }
 
-func (c *Client) batchSubSend(wg *sync.WaitGroup, batchArgs [][]string) error {
-	//log.Println("batch sub send:", len(batchArgs))
+func (c *Client) batchSubSend(wg *sync.WaitGroup, batchArgs [][]interface{}) error {
 	defer wg.Done()
 	for _, args := range batchArgs {
-		/*err := c.send([]interface{}{args})
+		/*err := c.send(args)
 		if err != nil {
 			log.Println("batchSubSend:", args, err)
 		}
-		//time.Sleep(1 * time.Millisecond)
-		time.Sleep(1500 * time.Microsecond)*/
+		time.Sleep(100 * time.Microsecond)*/
 		_, err := c.Do(args)
 		if err != nil {
-			log.Printf("batchSubSend Error[%v]:%v len:%d\n", args, err, len(args))
-			/*time.Sleep(500 * time.Millisecond)
-			//retry again
-			_, err = c.Do(args)
-			if err != nil {
-				log.Printf("batchSubSend Retry Error[%v]:%v len:%d\n", args, err, len(args))
-			}*/
+			log.Println("batchSubSend:", args, err)
 		}
-		//time.Sleep(1 * time.Millisecond)
 	}
 	return nil
 }
 
-func (c *Client) BatchSend(batchArgs [][]string) error {
+func (c *Client) BatchSend(batchArgs [][]interface{}) error {
 	var privatePool []*Client
-	log.Println("BatchSend Total:", len(batchArgs))
 	wg := &sync.WaitGroup{}
-	splitSize := 1000
+	splitSize := 400
 	connNum := len(batchArgs) / splitSize
 	if connNum < 1 {
 		connNum = 1
 	}
 
-	var splitArgs [][][]string
+	var splitArgs [][][]interface{}
 
 	if len(batchArgs) >= splitSize {
 		pics := int(len(batchArgs) / splitSize)
@@ -1046,7 +1060,9 @@ func (c *Client) BatchSend(batchArgs [][]string) error {
 		splitArgs = append(splitArgs, batchArgs)
 	}
 	connNum = len(splitArgs)
-	log.Println("BatchSend Total Connection:", connNum, c.Ip, c.Port, c.Password)
+	if debug {
+		log.Printf("BatchSend Total:%d Connection:%d ip:%v port:%v\n", len(batchArgs), connNum, c.Ip, c.Port)
+	}
 	for i := 0; i < connNum; i++ {
 		innerClient, err := Connect(c.Ip, c.Port, c.Password)
 		if err != nil {

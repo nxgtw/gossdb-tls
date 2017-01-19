@@ -54,8 +54,17 @@ var version string = "0.1.8"
 
 const layout = "2006-01-06 15:04:05"
 
-func Connect(ip string, port int, auth string) (*Client, error) {
-	client, err := connect(ip, port, auth)
+func Connect(host string, port int, auth string) (*Client, error) {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ips, err := net.LookupIP(host)
+		if err != nil || len(ips) == 0 {
+			log.Printf("Connect failed: The host or ip incorrect.")
+			return nil, nil
+		}
+		ip = ips[0]
+	}
+	client, err := connect(ip.String(), port, auth)
 	if err != nil {
 		if debug {
 			log.Printf("SSDB Client Connect failed:%s:%d error:%v\n", ip, port, err)

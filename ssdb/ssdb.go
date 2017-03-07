@@ -17,6 +17,7 @@ import (
 	"sync"
 	_ "syscall"
 	"time"
+	"unsafe"
 )
 
 type Client struct {
@@ -39,6 +40,11 @@ type Client struct {
 
 type ClientResult struct {
 	Id    string
+	Data  []string
+	Error error
+}
+
+type ClientProcessResult struct {
 	Data  []string
 	Error error
 }
@@ -104,12 +110,6 @@ func (c *Client) UseZip(flag bool) {
 }
 
 func (c *Client) Connect() error {
-	//log.Printf("Client[%s] connect to %s:%d\n", c.Id, c.Ip, c.Port)
-	/*addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", c.Ip, c.Port))
-	if err != nil {
-		log.Println("Client ResolveTCPAddr failed:", err)
-		return err
-	}*/
 	seconds := 60
 	timeOut := time.Duration(seconds) * time.Second
 	sock, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", c.Ip, c.Port), timeOut)
@@ -117,11 +117,6 @@ func (c *Client) Connect() error {
 		log.Println("SSDB Client dial failed:", err, c.Id)
 		return err
 	}
-	/*sock, err := net.DialTCP("tcp", nil, addr)
-	if err != nil {
-		log.Println("SSDB Client dial failed:", err, c.Id)
-		return err
-	}*/
 	c.sock = sock
 	c.Connected = true
 	if c.Retry {
@@ -152,8 +147,6 @@ func (c *Client) KeepAlive() {
 
 func (c *Client) HealthCheck() {
 	timeout := 30
-	//wait client connect to server
-	//time.Sleep(5 * time.Second)
 	for {
 		if c != nil && c.Connected && !c.Retry && !c.Closed {
 			result, err := c.Do("ping")
@@ -178,7 +171,6 @@ func (c *Client) RetryConnect() {
 		//log.Printf("Client[%s] retry connect to %s:%d Connected:%v Closed:%v\n", c.Id, c.Ip, c.Port, c.Connected, c.Closed)
 		for {
 			if !c.Connected && !c.Closed {
-				//log.Printf("Client[%s] retry connect to %s:%d\n", c.Id, c.Ip, c.Port)
 				err := c.Connect()
 				if err != nil {
 					log.Printf("Client[%s] Retry connect to %s:%d Failed. Error:%v\n", c.Id, c.Ip, c.Port, err)
@@ -193,7 +185,6 @@ func (c *Client) RetryConnect() {
 }
 
 func (c *Client) CheckError(err error) {
-	//if err == io.EOF || strings.Contains(err.Error(), "connection") || strings.Contains(err.Error(), "timed out") || strings.Contains(err.Error(), "route") {
 	if err != nil {
 		if !c.Closed {
 			log.Printf("Check Error:%v Retry connect.\n", err)
@@ -206,23 +197,29 @@ func (c *Client) CheckError(err error) {
 
 func (c *Client) processDo() {
 	for args := range c.process {
-		runId := args[0].(string)
-		runArgs := args[1:]
-		result, err := c.do(runArgs)
-		c.result <- ClientResult{Id: runId, Data: result, Error: err}
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Println("Recovered in processDo", r)
-			}
-		}()
-		/*if c != nil && c.Connected && !c.Retry && !c.Closed {
+		var timeout uint32 = 0
+		var runArgs []interface{}
+		runId := ""
+		if debug {
+			log.Println("processDo:", args)
+		}
+		switch args[0].(type) {
+		case uint32:
+			timeout = args[0].(uint32)
+			runId = args[1].(string)
+			runArgs = args[2:]
+		default:
+			runId = args[0].(string)
+			runArgs = args[1:]
+		}
+		if debug {
+			log.Println("processDo runArgs:", runArgs, timeout)
+		}
+		result, err := c.do(runArgs, timeout)
+		if !c.isChanClosed(c.result) {
 			c.result <- ClientResult{Id: runId, Data: result, Error: err}
-		} else {
-			time.Sleep(1 * time.Second)
-		}*/
+		}
 	}
-	//close(c.result)
-	//log.Println("processDo process channel has closed")
 }
 
 func ArrayAppendToFirst(src []interface{}, dst []interface{}) []interface{} {
@@ -234,7 +231,18 @@ func ArrayAppendToFirst(src []interface{}, dst []interface{}) []interface{} {
 func (c *Client) Do(args ...interface{}) ([]string, error) {
 	if c != nil && c.Connected && !c.Retry && !c.Closed {
 		runId := fmt.Sprintf("%d", time.Now().UnixNano())
-		args = ArrayAppendToFirst([]interface{}{runId}, args)
+		switch args[0].(type) {
+		case int:
+			timeout := uint32(args[0].(int))
+			args = args[1:]
+			args = ArrayAppendToFirst([]interface{}{runId}, args)
+			args = ArrayAppendToFirst([]interface{}{timeout}, args)
+		default:
+			args = ArrayAppendToFirst([]interface{}{runId}, args)
+		}
+		if debug {
+			log.Println("Do:", args)
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Println("Recovered in Do", r)
@@ -307,27 +315,85 @@ func (c *Client) Exec() ([][]string, error) {
 	return nil, fmt.Errorf("Connection has closed.")
 }
 
-func (c *Client) do(args []interface{}) ([]string, error) {
+func (c *Client) do(args []interface{}, timeout uint32) ([]string, error) {
 	if c.Connected {
-		err := c.Send(args)
-		if err != nil {
+		signal := make(chan ClientProcessResult)
+		if timeout > 0 {
 			if debug {
-				log.Printf("SSDB Client[%s] Do Send Error:%v Data:%v\n", c.Id, err, args)
+				log.Println("Do setTimeout:", timeout)
 			}
-			c.CheckError(err)
-			return nil, err
+			go c.setTimeout(timeout, signal)
 		}
-		resp, err := c.recv()
-		if err != nil {
+
+		go func() {
+			if !c.isChanClosed(signal) {
+				var cpr ClientProcessResult
+				err := c.Send(args)
+				if err != nil {
+					if debug {
+						log.Printf("SSDB Client[%s] Do Send Error:%v Data:%v\n", c.Id, err, args)
+					}
+					c.CheckError(err)
+					cpr.Data = nil
+					cpr.Error = err
+				}
+				resp, err := c.recv()
+				if err != nil {
+					if debug {
+						log.Printf("SSDB Client[%s] Do Receive Error:%v Data:%v\n", c.Id, err, args)
+					}
+					c.CheckError(err)
+					cpr.Data = nil
+					cpr.Error = err
+				}
+				cpr.Data = resp
+				cpr.Error = nil
+				if !c.isChanClosed(signal) {
+					signal <- cpr
+				}
+
+			}
+		}()
+		for result := range signal {
 			if debug {
-				log.Printf("SSDB Client[%s] Do Receive Error:%v Data:%v\n", c.Id, err, args)
+				log.Println("Do Receive:", result)
 			}
-			c.CheckError(err)
-			return nil, err
+			close(signal)
+			return result.Data, result.Error
 		}
-		return resp, nil
 	}
-	return nil, fmt.Errorf("lost connection")
+	return nil, fmt.Errorf("lost ssdb connection")
+}
+
+func (c *Client) isChanClosed(ch interface{}) bool {
+	if reflect.TypeOf(ch).Kind() != reflect.Chan {
+		panic("only channels!")
+	}
+	cptr := *(*uintptr)(unsafe.Pointer(
+		unsafe.Pointer(uintptr(unsafe.Pointer(&ch)) + unsafe.Sizeof(uint(0))),
+	))
+	cptr += unsafe.Sizeof(uint(0)) * 2
+	cptr += unsafe.Sizeof(unsafe.Pointer(uintptr(0)))
+	cptr += unsafe.Sizeof(uint16(0))
+	return *(*uint32)(unsafe.Pointer(cptr)) > 0
+}
+
+func (c *Client) setTimeout(timeout uint32, signal chan ClientProcessResult) {
+	boom := time.After(time.Duration(timeout) * time.Millisecond)
+	for {
+		select {
+		case <-boom:
+			if !c.isChanClosed(signal) {
+				var cpr ClientProcessResult
+				cpr.Data = nil
+				cpr.Error = fmt.Errorf("Operation timeout in %d ms.", timeout)
+				signal <- cpr
+			}
+			return
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 }
 
 func (c *Client) ProcessCmd(cmd string, args []interface{}) (interface{}, error) {
@@ -335,6 +401,9 @@ func (c *Client) ProcessCmd(cmd string, args []interface{}) (interface{}, error)
 		args = ArrayAppendToFirst([]interface{}{cmd}, args)
 		runId := fmt.Sprintf("%d", time.Now().UnixNano())
 		args = ArrayAppendToFirst([]interface{}{runId}, args)
+		if debug {
+			log.Println("ProcessCmd:", args)
+		}
 		var err error
 		c.process <- args
 		var resResult ClientResult
@@ -632,7 +701,7 @@ func (c *Client) HashGetAll(hash string) (map[string]string, error) {
 	} else {
 		return val.(map[string]string), err
 	}
-	return nil, nil
+	return nil, fmt.Errorf("Data has empty.")
 }
 
 func (c *Client) HashGetAllLite(hash string) (map[string]string, error) {
@@ -732,7 +801,7 @@ func (c *Client) HashMultiGet(hash string, keys []string) (map[string]string, er
 	} else {
 		return val.(map[string]string), err
 	}
-	return nil, nil
+	return nil, fmt.Errorf("data has empty")
 }
 
 func (c *Client) HashMultiDel(hash string, keys []string) (interface{}, error) {
@@ -1031,6 +1100,9 @@ func (c *Client) parse() []string {
 	Idx = 0
 	offset = 0
 	for {
+		if len(buf) < offset {
+			break
+		}
 		Idx = bytes.IndexByte(buf[offset:], '\n')
 		if Idx == -1 {
 			break

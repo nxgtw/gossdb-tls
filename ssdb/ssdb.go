@@ -36,6 +36,7 @@ type Client struct {
 	Closed    bool
 	init      bool
 	zip       bool
+	cmdTimeout int
 }
 
 type ClientResult struct {
@@ -108,7 +109,10 @@ func (c *Client) UseZip(flag bool) {
 	c.zip = flag
 	//log.Println("SSDB Client Zip Mode:", c.zip)
 }
-
+func (c *Client) SetCmdTimeout(cmdTimeout int) {
+	c.cmdTimeout = cmdTimeout
+	//log.Printf("set cmd timeout to %d",c.cmdTimeout)
+}
 func (c *Client) Connect() error {
 	seconds := 60
 	timeOut := time.Duration(seconds) * time.Second
@@ -209,6 +213,9 @@ func (c *Client) processDo() {
 			runId = args[1].(string)
 			runArgs = args[2:]
 		default:
+			// NXG Add for cmd timeout start
+			timeout = uint32(c.cmdTimeout)
+			// NXG Add for cmd timeout end
 			runId = args[0].(string)
 			runArgs = args[1:]
 		}

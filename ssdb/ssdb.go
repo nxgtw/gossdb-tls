@@ -3,6 +3,8 @@ package ssdb
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -21,22 +23,30 @@ import (
 )
 
 type Client struct {
-	sock      net.Conn
-	recv_buf  bytes.Buffer
-	process   chan []interface{}
-	batchBuf  [][]interface{}
-	result    chan ClientResult
-	Id        string
-	Ip        string
-	Port      int
-	Password  string
-	Connected bool
-	Retry     bool
-	mu        *sync.Mutex
-	Closed    bool
-	init      bool
-	zip       bool
+	sock       net.Conn
+	recv_buf   bytes.Buffer
+	process    chan []interface{}
+	batchBuf   [][]interface{}
+	result     chan ClientResult
+	Id         string
+	Ip         string
+	Port       int
+	Password   string
+	Connected  bool
+	Retry      bool
+	mu         *sync.Mutex
+	Closed     bool
+	init       bool
+	zip        bool
 	cmdTimeout int
+	tlsInfo    ClientTlsInfo //use TLS for server varification
+}
+
+// TLS info
+type ClientTlsInfo struct {
+	enable bool
+	caCrt  []byte
+	conn   *tls.Conn
 }
 
 type ClientResult struct {
@@ -61,20 +71,26 @@ var version string = "0.1.8"
 
 const layout = "2006-01-06 15:04:05"
 
-func Connect(host string, port int, auth string) (*Client, error) {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		ips, err := net.LookupIP(host)
-		if err != nil || len(ips) == 0 {
-			log.Printf("Connect failed: The host or ip incorrect.")
-			return nil, nil
+func Connect(host string, port int, auth string, tlsMode bool, caCrt []byte) (*Client, error) {
+	var connectDst string
+	if tlsMode {
+		connectDst = host
+	} else {
+		ip := net.ParseIP(host)
+		if ip == nil {
+			ips, err := net.LookupIP(host)
+			if err != nil || len(ips) == 0 {
+				log.Printf("Connect failed: The host or ip incorrect.")
+				return nil, nil
+			}
+			ip = ips[0]
 		}
-		ip = ips[0]
+		connectDst = ip.String()
 	}
-	client, err := connect(ip.String(), port, auth)
+	client, err := connect(connectDst, port, auth, tlsMode, caCrt)
 	if err != nil {
 		if debug {
-			log.Printf("SSDB Client Connect failed:%s:%d error:%v\n", ip, port, err)
+			log.Printf("SSDB Client Connect failed:%s:%d error:%v\n", connectDst, port, err)
 		}
 		go client.RetryConnect()
 		return client, err
@@ -85,7 +101,7 @@ func Connect(host string, port int, auth string) (*Client, error) {
 	return nil, nil
 }
 
-func connect(ip string, port int, auth string) (*Client, error) {
+func connect(ip string, port int, auth string, tlsMode bool, caCrt []byte) (*Client, error) {
 	//log.Printf("SSDB Client Version:%s\n", version)
 	var c Client
 	c.Ip = ip
@@ -93,6 +109,8 @@ func connect(ip string, port int, auth string) (*Client, error) {
 	c.Password = auth
 	c.Id = fmt.Sprintf("Cl-%d", time.Now().UnixNano())
 	c.mu = &sync.Mutex{}
+	c.tlsInfo.enable = tlsMode
+	c.tlsInfo.caCrt = caCrt
 	err := c.Connect()
 	return &c, err
 }
@@ -116,18 +134,47 @@ func (c *Client) SetCmdTimeout(cmdTimeout int) {
 func (c *Client) Connect() error {
 	seconds := 60
 	timeOut := time.Duration(seconds) * time.Second
-	sock, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", c.Ip, c.Port), timeOut)
-	if err != nil {
-		log.Println("SSDB Client dial failed:", err, c.Id)
-		return err
+
+	// [GDNS-3721] support tls connection
+	if c.tlsInfo.enable {
+		tlsDialer := new(net.Dialer)
+		tlsDialer.Timeout = timeOut
+		pool := x509.NewCertPool()
+		if c.tlsInfo.caCrt != nil && len(c.tlsInfo.caCrt) > 0 {
+			//log.Printf("c.tlsInfo.caCrt: %v", string(c.tlsInfo.caCrt))
+			pool.AppendCertsFromPEM(c.tlsInfo.caCrt)
+		}
+		conf := &tls.Config{
+			//InsecureSkipVerify: true,
+			RootCAs: pool,
+		}
+		//conn, err := tls.Dial("tcp", "tonybai.com:25555", conf)
+		conn, err := tls.DialWithDialer(tlsDialer, "tcp", fmt.Sprintf("%s:%d", c.Ip, c.Port), conf)
+		if err != nil {
+			log.Println("SSDB Client tls-dial failed:", err, c.Id)
+			return err
+		}
+		if conn != nil {
+			c.tlsInfo.conn = conn
+		}
+	} else {
+		sock, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", c.Ip, c.Port), timeOut)
+		if err != nil {
+			log.Println("SSDB Client dial failed:", err, c.Id)
+			return err
+		}
+		c.sock = sock
 	}
-	c.sock = sock
 	c.Connected = true
 	if c.Retry {
 		log.Printf("Client[%s] retry connect to %s:%d success.", c.Id, c.Ip, c.Port)
 	} else {
 		if debug {
-			log.Printf("Client[%s] connect to %s:%d success. Info:%v\n", c.Id, c.Ip, c.Port, c.sock.LocalAddr())
+			if c.tlsInfo.enable {
+				log.Printf("Client[%s] connect to %s:%d success. Info:%v\n", c.Id, c.Ip, c.Port, c.tlsInfo.conn.LocalAddr())
+			} else {
+				log.Printf("Client[%s] connect to %s:%d success. Info:%v\n", c.Id, c.Ip, c.Port, c.sock.LocalAddr())
+			}
 		}
 	}
 	c.Retry = false
@@ -138,8 +185,11 @@ func (c *Client) Connect() error {
 		c.init = true
 	}
 
-	if c.Password != "" {
-		c.Auth(c.Password)
+	// [GDNS-3721] TLS off: should authenticate with server
+	if !c.tlsInfo.enable {
+		if c.Password != "" {
+			c.Auth(c.Password)
+		}
 	}
 
 	return nil
@@ -192,7 +242,11 @@ func (c *Client) CheckError(err error) {
 	if err != nil {
 		if !c.Closed {
 			log.Printf("Check Error:%v Retry connect.\n", err)
-			c.sock.Close()
+			if c.tlsInfo.enable {
+				c.tlsInfo.conn.Close()
+			} else {
+				c.sock.Close()
+			}
 			go c.RetryConnect()
 		}
 
@@ -469,7 +523,12 @@ func (c *Client) ProcessCmd(cmd string, args []interface{}) (interface{}, error)
 			}
 		}
 		if len(resp) == 2 && strings.Contains(resp[1], "connection") {
-			c.sock.Close()
+			// [GDNS-3721] support tls connection
+			if c.tlsInfo.enable {
+				c.tlsInfo.conn.Close()
+			} else {
+				c.sock.Close()
+			}
 			go c.RetryConnect()
 		}
 		log.Printf("SSDB Client Error Response:%v args:%v Error:%v", resp, args, err)
@@ -564,10 +623,10 @@ func conHelper(chunk []HashData, wg *sync.WaitGroup, c *Client, results []interf
 	fmt.Printf("so - %v\n", time.Now())
 }
 
-func (c *Client) MultiHashSet(parts []HashData, connNum int) (interface{}, error) {
+func (c *Client) MultiHashSet(parts []HashData, connNum int, tlsMode bool, caCrt []byte) (interface{}, error) {
 	var privatePool []*Client
 	for i := 0; i < connNum-1; i++ {
-		innerClient, _ := Connect(c.Ip, c.Port, c.Password)
+		innerClient, _ := Connect(c.Ip, c.Port, c.Password, tlsMode, caCrt)
 		privatePool = append(privatePool, innerClient)
 	}
 	privatePool = append(privatePool, c)
@@ -835,6 +894,7 @@ func (c *Client) Zip(data []byte) string {
 
 func (c *Client) Send(args []interface{}) error {
 	var buf bytes.Buffer
+	var err error
 	if c.zip {
 		buf.WriteString("3")
 		buf.WriteByte('\n')
@@ -946,12 +1006,19 @@ func (c *Client) Send(args []interface{}) error {
 		buf.WriteByte('\n')
 	}
 	tmpBuf := buf.Bytes()
-	_, err := c.sock.Write(tmpBuf)
+	// [GDNS-3721] support tls connection
+	if c.tlsInfo.enable {
+		_, err = c.tlsInfo.conn.Write(tmpBuf)
+	} else {
+		_, err = c.sock.Write(tmpBuf)
+	}
 	return err
 }
 
+// 目前沒在用這個send
 func (c *Client) send(args []interface{}) error {
 	var buf bytes.Buffer
+	var err error
 	for _, arg := range args {
 		var s string
 		switch arg := arg.(type) {
@@ -998,7 +1065,12 @@ func (c *Client) send(args []interface{}) error {
 		buf.WriteByte('\n')
 	}
 	buf.WriteByte('\n')
-	_, err := c.sock.Write(buf.Bytes())
+	// [GDNS-3721] support tls connection
+	if c.tlsInfo.enable {
+		_, err = c.tlsInfo.conn.Write(buf.Bytes())
+	} else {
+		_, err = c.sock.Write(buf.Bytes())
+	}
 	return err
 }
 
@@ -1019,7 +1091,7 @@ func (c *Client) batchSubSend(wg *sync.WaitGroup, batchArgs [][]interface{}) err
 	return nil
 }
 
-func (c *Client) BatchSend(batchArgs [][]interface{}) error {
+func (c *Client) BatchSend(batchArgs [][]interface{}, tlsMode bool, caCrt []byte) error {
 	var privatePool []*Client
 	wg := &sync.WaitGroup{}
 	splitSize := 2000
@@ -1054,7 +1126,7 @@ func (c *Client) BatchSend(batchArgs [][]interface{}) error {
 		log.Printf("BatchSend Total:%d Connection:%d ip:%v port:%v\n", len(batchArgs), connNum, c.Ip, c.Port)
 	}
 	for i := 0; i < connNum; i++ {
-		innerClient, err := Connect(c.Ip, c.Port, c.Password)
+		innerClient, err := Connect(c.Ip, c.Port, c.Password, tlsMode, caCrt)
 		if err != nil {
 			log.Printf("BatchSend[%v]:%v\n", i, err)
 		}
@@ -1078,6 +1150,8 @@ func (c *Client) Recv() ([]string, error) {
 
 func (c *Client) recv() ([]string, error) {
 	var tmp [102400]byte
+	var n int
+	var err error
 	for {
 		resp := c.parse()
 		if resp == nil || len(resp) > 0 {
@@ -1092,7 +1166,12 @@ func (c *Client) recv() ([]string, error) {
 			}
 			return resp, nil
 		}
-		n, err := c.sock.Read(tmp[0:])
+		// [GDNS-3721] support tls connection
+		if c.tlsInfo.enable {
+			n, err = c.tlsInfo.conn.Read(tmp[0:])
+		} else {
+			n, err = c.sock.Read(tmp[0:])
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1229,7 +1308,12 @@ func (c *Client) Close() error {
 		if c.process != nil {
 			close(c.process)
 		}
-		c.sock.Close()
+		// [GDNS-3721] support tls connection
+		if c.tlsInfo.enable {
+			c.tlsInfo.conn.Close()
+		} else {
+			c.sock.Close()
+		}
 		c = nil
 	}
 

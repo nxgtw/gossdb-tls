@@ -142,13 +142,15 @@ func (c *Client) Connect() error {
 		pool := x509.NewCertPool()
 		if c.tlsInfo.caCrt != nil && len(c.tlsInfo.caCrt) > 0 {
 			//log.Printf("c.tlsInfo.caCrt: %v", string(c.tlsInfo.caCrt))
-			pool.AppendCertsFromPEM(c.tlsInfo.caCrt)
+			ok := pool.AppendCertsFromPEM(c.tlsInfo.caCrt)
+			if !ok {
+				log.Println("SSDB Client append certs failed:", c.tlsInfo.caCrt)
+			}
 		}
 		conf := &tls.Config{
 			//InsecureSkipVerify: true,
 			RootCAs: pool,
 		}
-		//conn, err := tls.Dial("tcp", "tonybai.com:25555", conf)
 		conn, err := tls.DialWithDialer(tlsDialer, "tcp", fmt.Sprintf("%s:%d", c.Ip, c.Port), conf)
 		if err != nil {
 			log.Println("SSDB Client tls-dial failed:", err, c.Id)
@@ -185,11 +187,8 @@ func (c *Client) Connect() error {
 		c.init = true
 	}
 
-	// [GDNS-3721] TLS off: should authenticate with server
-	if !c.tlsInfo.enable {
-		if c.Password != "" {
-			c.Auth(c.Password)
-		}
+	if c.Password != "" {
+		c.Auth(c.Password)
 	}
 
 	return nil

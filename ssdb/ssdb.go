@@ -139,7 +139,11 @@ func (c *Client) Connect() error {
 	if c.tlsInfo.enable {
 		tlsDialer := new(net.Dialer)
 		tlsDialer.Timeout = timeOut
-		pool := x509.NewCertPool()
+		// default append linux root CAs from /etc/ssl/certs
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			log.Println("Get linux root CAs certs failed:", err)
+		}
 		if c.tlsInfo.caCrt != nil && len(c.tlsInfo.caCrt) > 0 {
 			//log.Printf("c.tlsInfo.caCrt: %v", string(c.tlsInfo.caCrt))
 			ok := pool.AppendCertsFromPEM(c.tlsInfo.caCrt)

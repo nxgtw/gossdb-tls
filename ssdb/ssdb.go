@@ -72,47 +72,33 @@ var version string = "0.1.8"
 const layout = "2006-01-06 15:04:05"
 
 func Connect(host string, port int, auth string, tlsMode bool, caCrt []byte) (*Client, error) {
-	var connectDst string
-	if tlsMode {
-		connectDst = host
-	} else {
-		ip := net.ParseIP(host)
-		if ip == nil {
-			ips, err := net.LookupIP(host)
-			if err != nil || len(ips) == 0 {
-				log.Printf("Connect failed: The host or ip incorrect.")
-				return nil, nil
-			}
-			ip = ips[0]
-		}
-		connectDst = ip.String()
-	}
-	client, err := connect(connectDst, port, auth, tlsMode, caCrt)
-	if err != nil {
-		if debug {
-			log.Printf("SSDB Client Connect failed:%s:%d error:%v\n", connectDst, port, err)
-		}
-		go client.RetryConnect()
-		return client, err
-	}
-	if client != nil {
-		return client, nil
-	}
-	return nil, nil
+    client, err := connect(host, port, auth, tlsMode, caCrt)
+    if err != nil {
+        if debug {
+            log.Printf("SSDB Client Connect failed:%s:%d error:%v\n", host, port, err)
+        }
+        go client.RetryConnect()
+        return client, err
+    }
+    if client != nil {
+        return client, nil
+    }
+    return nil, nil
 }
 
 func connect(ip string, port int, auth string, tlsMode bool, caCrt []byte) (*Client, error) {
-	//log.Printf("SSDB Client Version:%s\n", version)
-	var c Client
-	c.Ip = ip
-	c.Port = port
-	c.Password = auth
-	c.Id = fmt.Sprintf("Cl-%d", time.Now().UnixNano())
-	c.mu = &sync.Mutex{}
-	c.tlsInfo.enable = tlsMode
-	c.tlsInfo.caCrt = caCrt
-	err := c.Connect()
-	return &c, err
+    //log.Printf("SSDB Client Version:%s\n", version)
+    var c Client
+    c.Ip = ip
+    c.Port = port
+    c.Password = auth
+    c.Id = fmt.Sprintf("Cl-%d", time.Now().UnixNano())
+    c.mu = &sync.Mutex{}
+    c.tlsInfo.enable = tlsMode
+    c.tlsInfo.caCrt = caCrt
+    c.cmdTimeout = 25000 // default 25 sec, prevent ssdb connection handle time over 30 sec
+    err := c.Connect()
+    return &c, err
 }
 
 func (c *Client) Debug(flag bool) bool {

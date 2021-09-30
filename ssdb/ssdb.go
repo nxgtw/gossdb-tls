@@ -1299,9 +1299,13 @@ func (c *Client) Close() error {
 		}
 		// [GDNS-3721] support tls connection
 		if c.tlsInfo.enable {
-			c.tlsInfo.conn.Close()
+			if c.tlsInfo.conn != nil {
+				c.tlsInfo.conn.Close()
+			}
 		} else {
-			c.sock.Close()
+			if c.sock != nil {
+				c.sock.Close()
+			}
 		}
 		c = nil
 	}
